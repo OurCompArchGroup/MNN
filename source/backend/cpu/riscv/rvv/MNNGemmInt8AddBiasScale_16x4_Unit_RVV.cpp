@@ -111,6 +111,27 @@
                 // ===============================
                 // 后处理（严格按标量逻辑）
                 // ===============================
+                {
+                    static int shown = 0;
+                    if (shown < 12 && getenv("XSAI_MNN_AME_DUMP") != nullptr &&
+                        src_depth_quad == 2 && dst_depth_quad == 4 && realCount == 8 && w == 0) {
+                        ++shown;
+                        fprintf(stderr, "[ref-rq] dz=%d bk=%d w=0 is=%p ib=%p min=%d max=%d",
+                                dz, bk, (void*)post->inputScale, (void*)post->inputBias,
+                                (int)post->minValue, (int)post->maxValue);
+                        if (post->inputScale) {
+                            fprintf(stderr, " is[0..3]=");
+                            for (int ii = 0; ii < 4; ++ii)
+                                fprintf(stderr, "%.7g ", (double)post->inputScale[ii]);
+                        }
+                        fprintf(stderr, "\n");
+                        for (int jj = 0; jj < GEMM_INT8_UNIT; ++jj) {
+                            fprintf(stderr, "  [ref-rq-detail] j=%d acc=%d sc=%.6g wb=%.6g bias=%.6g sum=%.6g\n",
+                                    jj, (int)acc[jj], (double)scale_dz[jj], (double)weightBias_dz[jj],
+                                    biasPtr ? (double)bias_dz[jj] : 0.0, (double)srcSumPtr[w]);
+                        }
+                    }
+                }
                 for (int j = 0; j < GEMM_INT8_UNIT; ++j) {
 
                     float value = acc[j] * scale_dz[j]

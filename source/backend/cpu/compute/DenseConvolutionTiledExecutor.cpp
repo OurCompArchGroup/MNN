@@ -426,7 +426,7 @@ ErrorCode DenseConvolutionTiledImpl::onResize(const std::vector<Tensor*>& inputs
                         memcpy(threadEL, el + 4 * inumber, 4 * sizeof(int));
                         threadEL[1] = std::min(ic - (t_ic * unit), unit);
                         const float* source = (const float*)((const uint8_t*)(srcPtr[inumber]) + t_ic * hw4Stride);
-                        auto gemmDest = gemmBuffer + t_ic * unit * eP * bytes;
+                        auto gemmDest = gemmBuffer + t_ic * unit * eP * matmulBytes;
                         packA((float *)gemmDest, &source, info, threadEL);
                 }
             }
@@ -458,7 +458,7 @@ ErrorCode DenseConvolutionTiledImpl::onResize(const std::vector<Tensor*>& inputs
                             }
                             finishedL = blockSize * bk;
                             wquantStride = static_cast<int32_t>(blockSize * bk * hP * halfStride);
-                            matmulUnit(_dstFloatPtr, (float*)(_APtr + eP * finishedL * bytes), (float*)(_weightPtr + wquantStride), paraParameters, relufp32, exeBiasPtr, (float*)(k + bk * ocUp4 * bytes), (float*)(b + bk * ocUp4 * bytes));
+                            matmulUnit(_dstFloatPtr, (float*)(_APtr + eP * finishedL * matmulBytes), (float*)(_weightPtr + wquantStride), paraParameters, relufp32, exeBiasPtr, (float*)(k + bk * ocUp4 * bytes), (float*)(b + bk * ocUp4 * bytes));
                         }
                     }
                 }
@@ -489,7 +489,7 @@ ErrorCode DenseConvolutionTiledImpl::onResize(const std::vector<Tensor*>& inputs
                             }
                             finishedL = blockSize * bk;
                             wquantStride = static_cast<int32_t>(blockSize * bk * hP * halfStride);
-                            matmulRemain(_dstFloatPtr, (float*)(_APtr + eP * finishedL * bytes), (float*)(_weightPtr + wquantStride), xC, paraParameters, relufp32, exeBiasPtr, (float*)(k + bk * ocUp4 * bytes), (float*)(b + bk * ocUp4 * bytes));
+                            matmulRemain(_dstFloatPtr, (float*)(_APtr + eP * finishedL * matmulBytes), (float*)(_weightPtr + wquantStride), xC, paraParameters, relufp32, exeBiasPtr, (float*)(k + bk * ocUp4 * bytes), (float*)(b + bk * ocUp4 * bytes));
                         }
                     }
                 }
@@ -560,7 +560,7 @@ ErrorCode DenseConvolutionTiledImpl::onResize(const std::vector<Tensor*>& inputs
                         finishedL = blockSize * bk;
                         wquantStride = static_cast<int32_t>(blockSize * bk * hP * halfStride);
 
-                        matmulUnit(_dstFloatPtr, (float*)(gemmBuffer + bytes * eP * finishedL), (float*)(_weightPtr + wquantStride), parameters, relufp32, exeBiasPtr, (float*)(dequantAlpha + bk * ocUp4 * bytes), (float*)(dequantBias + bk * ocUp4 * bytes));
+                        matmulUnit(_dstFloatPtr, (float*)(gemmBuffer + matmulBytes * eP * finishedL), (float*)(_weightPtr + wquantStride), parameters, relufp32, exeBiasPtr, (float*)(dequantAlpha + bk * ocUp4 * bytes), (float*)(dequantBias + bk * ocUp4 * bytes));
                     }
                 } else {
                     for (int bk = 0; bk < blockNum; ++bk) {
@@ -572,7 +572,7 @@ ErrorCode DenseConvolutionTiledImpl::onResize(const std::vector<Tensor*>& inputs
                         finishedL = blockSize * bk;
                         wquantStride = static_cast<int32_t>(blockSize * bk * hP * halfStride);
 
-                        matmulRemain(_dstFloatPtr, (float*)(gemmBuffer + eP * bytes * finishedL), (float*)(_weightPtr + wquantStride), xC, parameters, relufp32, exeBiasPtr, (float*)(dequantAlpha + bk * ocUp4 * bytes), (float*)(dequantBias + bk * ocUp4 * bytes ));
+                        matmulRemain(_dstFloatPtr, (float*)(gemmBuffer + eP * matmulBytes * finishedL), (float*)(_weightPtr + wquantStride), xC, parameters, relufp32, exeBiasPtr, (float*)(dequantAlpha + bk * ocUp4 * bytes), (float*)(dequantBias + bk * ocUp4 * bytes ));
                     }
                     // matmulRemain(_dstFloatPtr, (float*)gemmBuffer, (float*)weightPtr, xC, parameters, postParameters.data(), biasPtr, k, b);
                 }

@@ -329,9 +329,25 @@ void MNNPackC4ForMatMul_ABF16(float* destOrigin, float const** sourceGroup, cons
 #endif
 
 static CoreFunctions* gInstance = nullptr;
+#if defined(__riscv)
+void RISCVBF16FillCoreFunctions(CoreFunctions* gInstance);
+#endif
 bool BF16Functions::init() {
 #if !defined(MNN_USE_NEON)
+#if defined(__riscv)
+    // RISC-V has no bf16 ISA support upstream; the portable implementation
+    // (BF16FunctionsRISCV.cpp) carries bf16 tensors (bytes == 2) and routes
+    // dense GEMM through the XSAI AME bf16 kernel when XSAI_MNN_AME=1.
+    if (gInstance != nullptr) {
+        return true;
+    }
+    gInstance = new CoreFunctions;
+    *gInstance = *MNNGetCoreFunctions();
+    RISCVBF16FillCoreFunctions(gInstance);
+    return true;
+#else
     return false;
+#endif
 #else
     gInstance = new CoreFunctions;
     *gInstance = *MNNGetCoreFunctions();

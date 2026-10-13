@@ -6,12 +6,26 @@
 //
 
 #include "ConvInt8TiledExecutor.hpp"
+#include <cstdio>
+#include <cstdlib>
 #include "ConvolutionTiledExecutor.hpp"
+// XSAI AME drop-in int8 GEMM kernel (env XSAI_MNN_AME=1 selects it).
+bool xsai_ame_gemm_enabled();
+void xsai_ame_set_gemm_units(int unit, int src_unit, int dst_xunit);
+extern "C" bool xsai_ame_int8_supported(size_t src_depth_quad, size_t dst_depth_quad, size_t real_count);
+void xsai_ame_int8_gemm_kernel(int8_t* dst, const int8_t* src, const int8_t* weight,
+                               size_t src_depth_quad, size_t dst_step, size_t dst_depth_quad,
+                               const QuanPostTreatParameters* post, size_t realCount);
 #include "core/Macro.h"
 #include "core/BufferAllocator.hpp"
 #include "SharedGather.hpp"
 
 #include <math.h>
+#include <cstddef>
+// Monotonic per-gemm-call id, shared with the XSAI AME kernel dump so the two
+// traces (MNN int8 kernel vs AME kernel) can be compared call by call.
+static unsigned long long g_int8CallCounter = 0;
+extern "C" void xsai_ame_set_call_id(unsigned long long id);
 #include "backend/cpu/CPUBackend.hpp"
 #include "CPUExtension.hpp"
 #include "core/Concurrency.h"
@@ -929,6 +943,7 @@ DenseConvInt8TiledExecutor::DenseConvInt8TiledExecutor(Backend* backend, const O
 
         // gemmInt8 kernel
         mGemmKernel = mRelatedFunctions.Int8GemmKernel;
+
 #ifdef MNN_USE_SSE
         if (convOp->symmetricQuan()) {
             int actBits = convOp->symmetricQuan()->nbits();
@@ -2364,8 +2379,104 @@ ErrorCode DenseConvInt8TiledExecutor::onExecute(const std::vector<Tensor*>& inpu
                     quanParam.accumBuffer = accumbuff;
                 }
                 quanParam.srcKernelSum = ptrX;
-                mGemmKernel(outputInTilePtr, im2colDst, weightPtrTid, blockL, dstZStep * dstBytes, ocDivThread,
-                            &quanParam, step);
+                decltype(mGemmKernel) gemm = mGemmKernel;
+                if (xsai_ame_gemm_enabled() && dstBytes == 1 && mBlockNum == 1 &&
+                    mResourceInt8->mWeightBits == 8 && !mResourceInt8->mWeightAsymmetricQuant &&
+                    !mOnlineReorderWeightSme && xsai_ame_int8_supported(blockL, ocDivThread, step)) {
+                    xsai_ame_set_gemm_units(mGemmUnits[0], mGemmUnits[1], mGemmUnits[2]);
+                    gemm = xsai_ame_int8_gemm_kernel;
+                }
+    {
+        static int lay = 0;
+        if (lay == 0 && getenv("XSAI_MNN_AME_DUMP") != nullptr) {
+            lay = 1;
+            fprintf(stderr, "[layout-EXEC] size=%zu scale=%zu biasFloat=%zu sum=%zu wks=%zu fp32minmax=%zu is=%zu ib=%zu accumbuf=%zu blockNum=%zu useInt8=%zu min=%zu max=%zu\n",
+                    sizeof(QuanPostTreatParameters),
+                    offsetof(QuanPostTreatParameters, scale),
+                    offsetof(QuanPostTreatParameters, biasFloat),
+                    offsetof(QuanPostTreatParameters, srcKernelSum),
+                    offsetof(QuanPostTreatParameters, weightKernelSum),
+                    offsetof(QuanPostTreatParameters, fp32minmax),
+                    offsetof(QuanPostTreatParameters, inputScale),
+                    offsetof(QuanPostTreatParameters, inputBias),
+                    offsetof(QuanPostTreatParameters, accumBuffer),
+                    offsetof(QuanPostTreatParameters, blockNum),
+                    offsetof(QuanPostTreatParameters, useInt8),
+                    offsetof(QuanPostTreatParameters, minValue),
+                    offsetof(QuanPostTreatParameters, maxValue));
+        }
+    }
+                const bool ameKernel = (gemm == xsai_ame_int8_gemm_kernel);
+                const unsigned long long callId = g_int8CallCounter++;
+                if (ameKernel) {
+                    xsai_ame_set_call_id(callId);
+                }
+                {
+                    // Pre-call checksum of the packed A block: separates "the
+                    // input really differs upstream" from "something rewrote the
+                    // im2col buffer during the call".
+                    static int adump = -1;
+                    if (adump < 0) adump = getenv("XSAI_MNN_AME_DUMP") != nullptr ? 1 : 0;
+                    if (adump == 1 && callId >= 1500 && callId <= 1600) {
+                        unsigned long long h = 1469598103934665603ULL;
+                        const size_t n = blockL * mGemmUnits[2] * mGemmUnits[1];
+                        for (size_t i = 0; i < n; ++i) {
+                            h = (h ^ (unsigned char)im2colDst[i]) * 1099511628211ULL;
+                        }
+                        fprintf(stderr, "[int8-ahash] call=%llu ame=%d blkL=%zu rc=%zu h=%016llx\n",
+                                callId, ameKernel ? 1 : 0, blockL, step, h);
+                    }
+                }
+                gemm(outputInTilePtr, im2colDst, weightPtrTid, blockL, dstZStep * dstBytes, ocDivThread,
+                     &quanParam, step);
+                // Kernel-independent differential dump: identical dump points for
+                // the MNN int8 kernel and the XSAI AME kernel, so an AME=0 /
+                // AME=1 diff of the two traces localizes the first bad call.
+                {
+                    static int dump = -1;
+                    if (dump < 0) dump = getenv("XSAI_MNN_AME_DUMP") != nullptr ? 1 : 0;
+                    if (dump == 1) {
+                        const unsigned long long call = callId;
+                        // Full-block byte dump for the K == 32 shape (blkL == 2):
+                        // the whole [sz][px][16] A block and the [sz][oc][16] weight
+                        // block for the first calls, so the (px0, oc0) dot product
+                        // can be recomputed off-line under any packing hypothesis.
+                        if (blockL == 2) {
+                            static int ab = 0;
+                            if (ab < 3) {
+                                ++ab;
+                                fprintf(stderr, "[int8-ab] call=%llu blkL=%zu dq=%zu rc=%zu", call, blockL,
+                                        ocDivThread, step);
+                                fprintf(stderr, " A=");
+                                for (int i = 0; i < 256; ++i) fprintf(stderr, "%02x", (unsigned char)im2colDst[i]);
+                                fprintf(stderr, " W=");
+                                for (int i = 0; i < 128; ++i) fprintf(stderr, "%02x", (unsigned char)weightPtrTid[i]);
+                                fprintf(stderr, "\n");
+                            }
+                        }
+                        if (call < 4000) {
+                            const int8_t* w0 = weightPtrTid;
+                            const float* sc0 = (const float*)(w0 + blockL * mGemmUnits[0] * mGemmUnits[1]);
+                            fprintf(stderr,
+                                    "[int8-dump] call=%llu ame=%d blkL=%zu dq=%zu rc=%zu dstStep=%zu "
+                                    "sc0=%.6g wb0=%.6g bias0=%.6g sum0=%.6g is0=%s ib0=%s wks0=%s in0=%d dst16=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+                                    call, ameKernel ? 1 : 0, blockL, ocDivThread, step,
+                                    dstZStep * dstBytes, (double)sc0[0], (double)sc0[mGemmUnits[0]],
+                                    (double)(quanParam.biasFloat ? ((const float*)quanParam.biasFloat)[0] : 0.f),
+                                    quanParam.inputScale ? "y" : "n", quanParam.inputBias ? "y" : "n",
+                                    quanParam.weightKernelSum ? "y" : "n",
+                                    quanParam.srcKernelSum ? (double)quanParam.srcKernelSum[0] : 0.0, (int)im2colDst[0],
+                                    (unsigned char)outputInTilePtr[0], (unsigned char)outputInTilePtr[1],
+                                    (unsigned char)outputInTilePtr[2], (unsigned char)outputInTilePtr[3],
+                                    (unsigned char)outputInTilePtr[4], (unsigned char)outputInTilePtr[5],
+                                    (unsigned char)outputInTilePtr[6], (unsigned char)outputInTilePtr[7],
+                                    (unsigned char)outputInTilePtr[8], (unsigned char)outputInTilePtr[9],
+                                    (unsigned char)outputInTilePtr[10], (unsigned char)outputInTilePtr[11],
+                                    (unsigned char)outputInTilePtr[12], (unsigned char)outputInTilePtr[13],
+                                    (unsigned char)outputInTilePtr[14], (unsigned char)outputInTilePtr[15]);
+                        }
+                    }
+                }
                 ptrX += (step * mBlockNum);
                 realDstCount -= step;
                 outputInTilePtr += DST_XUNIT * PackUnit * dstBytes;
@@ -2557,6 +2668,11 @@ ErrorCode DenseConvInt8TiledExecutor::onExecute(const std::vector<Tensor*>& inpu
                     if (mBlockNum > 1) {
                         memset(accumbuff, 0, UNIT * 4 * DST_XUNIT);
                         quanParam.accumBuffer = accumbuff;
+                    }
+                    if (xsai_ame_gemm_enabled() && dstBytes == 1 && mBlockNum == 1 &&
+                        mResourceInt8->mWeightBits == 8 && !mResourceInt8->mWeightAsymmetricQuant &&
+                        !mOnlineReorderWeightSme && xsai_ame_int8_supported(blockL, ocDivThread, step)) {
+                        gemmInt8 = xsai_ame_int8_gemm_kernel;
                     }
                     gemmInt8(outputInTilePtr, im2colDstThread, weightPtrTid, blockL, dstZStep * dstBytes, ocDivThread,
                              &quanParam, step);
