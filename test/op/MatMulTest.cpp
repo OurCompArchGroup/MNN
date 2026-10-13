@@ -130,6 +130,15 @@ protected:
                 return false;
             }
         }
+        {
+            // LLM-shaped large-K case: exercises the AME bf16 fast path
+            // (h*l >= min_macs, K beyond the old 2048 tile-buffer limit).
+            bool succ = MatMulCommonTest::test(MNN_FORWARD_CPU, "device_name", "MatMul", 64, 4096, 4096,
+                                               128, false, false, precision, false);
+            if (!succ) {
+                return false;
+            }
+        }
 
         for (int height_c = 1; height_c <= 20; ++height_c) {
             for (int width_c = 1; width_c <= 20; ++width_c) {

@@ -25,6 +25,7 @@
 #include <sys/time.h>
 #endif
 #include <MNN/MNNDefine.h>
+#include "ame_xsa.h"
 #include <MNN/AutoTime.hpp>
 #include <MNN/Interpreter.hpp>
 #include <MNN/Tensor.hpp>
@@ -211,6 +212,19 @@ static int test_main(int argc, const char* argv[]) {
     if (argc > 3) {
         runMask = atoi(argv[3]);
     }
+
+    if (getenv("XSAI_AME_PROBE") != NULL) {
+        const xsai_ame_hw_config* hw = xsai_ame_hw_probe();
+        if (hw->valid) {
+            MNN_PRINT("[xsai-ame] tlenb=%llu trlenb=%llu alenb=%llu rows=%llu melen_bits=%llu arlenb=%llu int8 m=%d k=%d n32=%d\n",
+                      (unsigned long long)hw->tlenb, (unsigned long long)hw->trlenb,
+                      (unsigned long long)hw->alenb, (unsigned long long)hw->rows,
+                      (unsigned long long)hw->melen_bits, (unsigned long long)hw->arlenb,
+                      hw->int8_m_max, hw->int8_k_max, hw->int32_n_max);
+        } else {
+            MNN_PRINT("[xsai-ame] hw probe invalid (AME unavailable on this core?)\n");
+        }
+    }
     int saveOutput = 0;
     if ((runMask & 1) || (runMask & 2)) {
         MNN_PRINT("Save AllTensors to output/*.txt\n");
@@ -380,6 +394,7 @@ static int test_main(int argc, const char* argv[]) {
                           tensor->height(), tensor->channel(), tensor->batch());
                 outputFileName << "output/Input_" << opCopyName << "_" << i;
                 dumpTensor2File(expectTensor, outputFileName.str().c_str(), orderFileOs);
+                MNN_PRINT("[xsai-mnn] dump %s input done\n", opName.c_str());
                 delete expectTensor;
             }
             return true;
@@ -418,9 +433,21 @@ static int test_main(int argc, const char* argv[]) {
             }
             return true;
         };
+        if (getenv("XSAI_CPT_MARK")) {
+            register long a0 asm("a0") = 0x101; // NOTIFY_PROFILER
+            __asm__ volatile(".insn r 0x6B, 0, 0, x0, x0, x0" : : "r"(a0) : "memory");
+        }
         net->runSessionWithCallBack(session, beforeCallBack, callBack);
     } else {
+        if (getenv("XSAI_CPT_MARK")) {
+            register long a0 asm("a0") = 0x101; // NOTIFY_PROFILER
+            __asm__ volatile(".insn r 0x6B, 0, 0, x0, x0, x0" : : "r"(a0) : "memory");
+        }
         net->runSession(session);
+    }
+    if (getenv("XSAI_CPT_MARK")) {
+        register long a0 asm("a0") = 0x102; // NOTIFY_WORKLOAD_EXIT
+        __asm__ volatile(".insn r 0x6B, 0, 0, x0, x0, x0" : : "r"(a0) : "memory");
     }
 
     // save output

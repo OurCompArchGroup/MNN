@@ -112,12 +112,15 @@ using ConvertFP32 = float(*)(float fp32Value);
 const static std::vector<ConvertFP32> FP32Converter = {
     keepFP32Precision,
     keepFP32Precision,
+    convertFP32ToFP16,
 #ifdef MNN_SUPPORT_BF16
+    // Precision_Low_BF16 (index 3) drives the bf16 CPU backend; the reference
+    // must simulate bf16, not fp16, or strict tolerances (matmul 5e-3) compare
+    // across different precisions and always fail.
     convertFP32ToBF16,
 #else
     keepFP32Precision,
 #endif
-    convertFP32ToFP16
 };
 
 #endif /* TestUtils_h */

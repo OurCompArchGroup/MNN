@@ -347,7 +347,9 @@ public:
                     for (int dy=1; dy<2; ++dy) {
                         for (int px=2; px<4; ++px) {
                             for (int py=3; py<4; ++py) {
-                                for (int ic=1; ic<=64; ic*=8) {
+                                const int icList[] = {1, 8, 64, 96, 160, 320};
+                                for (int icIdx = 0; icIdx < 6; ++icIdx) {
+                                    const int ic = icList[icIdx];
                                     for (int oc=1; oc<=64; oc*=8) {
                                         INTS strides = {sx, sy}, dilate = {dx, dy}, pad = {px, py}, inputShape = {iw, ih};
                                         INTS channel = {ic, oc};
