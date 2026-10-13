@@ -852,6 +852,11 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
             }
         }
 
+        // Bytes per element in the KV cache as seen by the packed matmul's B
+        // operand: the bf16 backend (matmulBytes == 2, e.g. the riscv bf16 core
+        // functions) stores K/V as bf16 (see CPUKVCacheManager), so cache
+        // pointer arithmetic must advance at 2 bytes per element.
+        const size_t kvBytes = (gcore->matmulBytes == 2) ? 2 : (size_t)mBytes;
         size_t vBlockElements = ROUND_UP(mHeadDim, hP) * ROUND_UP(mKVCacheManager->getFlashAttentionBlockKv(), lP);
         if (mValueQuantMode == KVQuantMode::Int8) {
             vBlockElements = (ROUND_UP(mHeadDim, hP8) * ROUND_UP(mKVCacheManager->getFlashAttentionBlockKv(), lP8) +
@@ -1033,7 +1038,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         }
                     }
                 } else if (mKeyQuantMode != KVQuantMode::Int8) {
-                    auto keyPtr = keyAddr + i * UP_DIV(mKvBlockSize, hP) * ROUND_UP(mHeadDim, lP) * hP * mBytes;
+                    auto keyPtr =
+                        keyAddr + i * UP_DIV(mKvBlockSize, hP) * ROUND_UP(mHeadDim, lP) * hP * kvBytes;
                     int loop_e = qRows / eP;
                     int remain = qRows % eP;
                     // Skip eP tiles whose rows are all masked; softmax memsets them without reading src
@@ -1244,8 +1250,8 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                         const int subBlockStartRow = kvStart + subBlockIdx * (int)vBlockSize;
                         const int subBlockSize = ALIMIN(curKvBlockSize - subBlockIdx * (int)vBlockSize, (int)vBlockSize);
                         const int inBlock = subBlockStartRow % (int)vBlockSize;
-                        auto valuePtr = valueAddr + (subBlockStartRow / (int)vBlockSize) * vBlockElements * mBytes +
-                                        ((inBlock / lP) * hP * lP + inBlock % lP) * mBytes;
+                        auto valuePtr = valueAddr + (subBlockStartRow / (int)vBlockSize) * vBlockElements * kvBytes +
+                                        ((inBlock / lP) * hP * lP + inBlock % lP) * kvBytes;
                         size_t shapeParameters[7] = {(size_t)eP * lP * mBytes,
                                                      ROUND_UP((size_t)subBlockSize, lP),
                                                      (size_t)mHeadDim,
@@ -1254,7 +1260,11 @@ ErrorCode CPUAttention::onExecute(const std::vector<Tensor*>& inputs, const std:
                                                      0,
                                                      0};
                         // Physical N-group stride covers vBlockSize rows, logical only subBlockSize.
-                        size_t vRowPadStride = (ROUND_UP(vBlockSize, lP) - ROUND_UP(subBlockSize, lP)) * hP * mBytes;
+                        // Extra row stride in BYTES of B elements: the bf16 backend's
+                        // B elements are 2 bytes (kvBytes), so the pad must be counted
+                        // with the same unit the packed-matmul decoder uses.
+                        size_t vRowPadStride =
+                            (ROUND_UP(vBlockSize, lP) - ROUND_UP(subBlockSize, lP)) * hP * kvBytes;
                         shapeParameters[5] = vRowPadStride;
                         // Sub-block's A panel starts subBlockIdx*vBlockSize columns into qkSoftmax
                         // ([kv/mPack][qRows][mPack]; vBlockSize is divisible by mPack).

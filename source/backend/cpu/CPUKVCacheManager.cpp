@@ -784,8 +784,29 @@ void CPUKVCacheManager::ProcessKey(const Tensor* key, int seqLen, int kvHead) {
         T* key_dst = reinterpret_cast<T*>(addrOfKey(kvHead));
         auto stride0 = ROUND_UP(mHeadDim, lP) * hP;
         auto stride1 = hP * lP;
+        auto core = static_cast<CPUBackend*>(mBackend)->functions();
+        if (core->matmulBytes == 2) {
+            // bf16 GEMM backend (e.g. the riscv bf16 core functions): store K
+            // as bf16 with the identical index math so the packed matmul's B
+            // operand reads it directly. The cache is allocated at mBytes == 4
+            // per element, so the 2-byte elements always fit.
+            uint16_t* bf16Dst = reinterpret_cast<uint16_t*>(key_dst);
+            for (int i = 0; i < seqLen; i++) {
+                T* key_src = key->host<T>() + i * mKvNumHead * mHeadDim + kvHead * mHeadDim;
+                int out_index = (mPastLength + i) / hP;
+                int in_index = (mPastLength + i) % hP;
+                for (int j = 0; j < mHeadDim; j++) {
+                    float v = (float)key_src[j];
+                    uint32_t bits;
+                    ::memcpy(&bits, &v, 4);
+                    bits &= 0xffff0000u;
+                    bf16Dst[out_index * stride0 + (j / lP) * stride1 + in_index * lP + (j % lP)] =
+                        (uint16_t)(bits >> 16);
+                }
+            }
+            return;
+        }
         if (mBytes == 4 && hP == 4 && lP == 1 && (mPastLength % hP) == 0 && (seqLen % hP) == 0) {
-            auto core = static_cast<CPUBackend*>(mBackend)->functions();
             if (core->pack == hP) {
                 int areaOffset[] = {mKvNumHead * mHeadDim, ROUND_UP(mHeadDim, lP)};
                 auto keySrc = reinterpret_cast<const float*>(key->host<T>()) + kvHead * mHeadDim;
@@ -932,6 +953,26 @@ void CPUKVCacheManager::ProcessValue(const Tensor* value, int seqLen, int kvHead
         auto weightStride0 = weightStride1 * UP_DIV(mHeadDim, hP);
 
         T* value_dst = reinterpret_cast<T*>(addrOfValue(kvHead));
+        if (static_cast<CPUBackend*>(mBackend)->functions()->matmulBytes == 2) {
+            // bf16 GEMM backend: store V as bf16 (same index math), see the
+            // matching branch in ProcessKey.
+            uint16_t* bf16Dst = reinterpret_cast<uint16_t*>(value_dst);
+            for (int i = 0; i < seqLen; i++) {
+                int kvSeqIndx = mPastLength + i;
+                int seqInChunk = kvSeqIndx % (int32_t)mFlashAttentionUpperKv;
+                int idxInner = (kvSeqIndx / (int32_t)mFlashAttentionUpperKv) * weightStride0 +
+                               seqInChunk / lP * weightStride2 + seqInChunk % lP;
+                for (int j = 0; j < mHeadDim; j++) {
+                    int idxBase = (j / hP) * weightStride1 + (j % hP) * lP;
+                    float v = (float)loadValue(i, channelBase + j);
+                    uint32_t bits;
+                    ::memcpy(&bits, &v, 4);
+                    bits &= 0xffff0000u;
+                    bf16Dst[idxBase + idxInner] = (uint16_t)(bits >> 16);
+                }
+            }
+            return;
+        }
         if (valueC4 && mBytes == 4 && pack == hP && hP == 4 && lP == 1 && (mHeadDim % hP) == 0 &&
             mFlashAttentionUpperKv > 0) {
             const int channelQuads = UP_DIV(mHeadDim, hP);

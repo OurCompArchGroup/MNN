@@ -11,6 +11,7 @@
 #include <sstream>
 #include <iomanip>
 #include <unordered_set>
+#include <stdlib.h>
 
 #include "prompt_cache_utils.hpp"
 #include <MNN/AutoTime.hpp>
@@ -253,6 +254,22 @@ void Llm::initRuntime() {
         cpuBackendConfig.precision = BackendConfig::Precision_High;
     } else if (mConfig->precision() == "low") {
         cpuBackendConfig.precision = BackendConfig::Precision_Low;
+    } else if (mConfig->precision() == "low_bf16" || mConfig->precision() == "bf16") {
+        // Explicit bf16: on riscv the bf16 core functions route dense GEMM
+        // through the XSAI AME fast path (BF16FunctionsRISCV.cpp).
+        cpuBackendConfig.precision = BackendConfig::Precision_Low_BF16;
+    } else if (mConfig->precision().empty() && config.type == MNN_FORWARD_CPU) {
+#if defined(__riscv)
+        // Default on riscv CPU with the AME explicitly enabled: bf16 turns the
+        // LLM matmul/attention projections onto the AME kernels. Without
+        // XSAI_MNN_AME=1 the portable bf16 table would be a slow scalar path,
+        // so the default stays fp32 there. "precision": "high"/"low" in
+        // config.json always overrides.
+        const char* ameEnv = getenv("XSAI_MNN_AME");
+        if (ameEnv != nullptr && ameEnv[0] == '1') {
+            cpuBackendConfig.precision = BackendConfig::Precision_Low_BF16;
+        }
+#endif
     }
     config.backendConfig = &cpuBackendConfig;
 
